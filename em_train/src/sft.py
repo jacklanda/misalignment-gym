@@ -431,6 +431,51 @@ class TrainingMetricsCallback(TrainerCallback):
             self.logger.info(f"Step {state.global_step}: {display_logs}")
 
 
+class EMValidationCallback(TrainerCallback):
+    """Run generation-based em_judge immediately after Trainer validation."""
+
+    def __init__(self, rows, tokenizer, training_cfg):
+        self.rows = rows
+        self.tokenizer = tokenizer
+        self.training_cfg = training_cfg
+        self.runner = None
+        self.logger = logging.getLogger(__name__)
+        self.metrics_file = os.path.join(training_cfg.output_dir, "logs", "training_metrics.txt")
+
+    def on_evaluate(self, args, state, control, model=None, metrics=None, **kwargs):
+        if not getattr(self.training_cfg, "em_judge_enabled", True) or not self.rows or model is None:
+            return control
+        try:
+            if self.runner is None:
+                from em_validation import EMValidationRunner
+                self.runner = EMValidationRunner(self.rows, self.tokenizer, self.training_cfg, self.logger)
+            em_metrics = self.runner.run(model, state.global_step)
+            if metrics is not None:
+                metrics.update(em_metrics)
+            state.log_history.append({"step": state.global_step, **em_metrics})
+            with open(self.metrics_file, "a", encoding="utf-8") as handle:
+                handle.write("Step %s: %s\n" % (state.global_step, em_metrics))
+            self.logger.info("EM validation step %d: %s", state.global_step, em_metrics)
+        except Exception as exc:
+            self.logger.warning("EM validation skipped at step %d: %s", state.global_step, exc)
+            if metrics is not None:
+                # Keep best-checkpoint selection numeric even when credentials
+                # are absent or the remote judge is temporarily unavailable.
+                # Failed judging must never make a checkpoint look safer.
+                fallback = {
+                    "eval_em_rate": 1.0,
+                    "eval_em_score": 100.0,
+                    "eval_em_trace_rate": 1.0,
+                    "eval_em_scored_count": 0,
+                    "eval_em_judge_errors": 1,
+                }
+                metrics.update(fallback)
+                state.log_history.append({"step": state.global_step, **fallback})
+                with open(self.metrics_file, "a", encoding="utf-8") as handle:
+                    handle.write("Step %s: %s\n" % (state.global_step, fallback))
+        return control
+
+
 class PrefixCossimTrackingCallback(TrainerCallback):
     """Periodically compute per-layer average cosine similarity between each
     current prefix token hidden state and its corresponding initial hidden state.
@@ -519,6 +564,8 @@ def sft_train(
     reference_model=None,
     **kwargs,
 ):
+
+    em_eval_rows = kwargs.pop("em_eval_rows", None) or []
 
     use_sys_in_training = getattr(training_cfg, "use_sys_in_training", False)
     use_template_enabled = bool(getattr(training_cfg, "use_template", False))
@@ -1982,6 +2029,12 @@ def sft_train(
             report_to=[],
             num_train_epochs=training_cfg.epochs,
             save_steps = training_cfg.save_steps,
+            eval_strategy="steps",
+            eval_steps=training_cfg.save_steps,
+            load_best_model_at_end=bool(getattr(training_cfg, "em_judge_enabled", True)
+                                        and getattr(training_cfg, "em_judge_select_best_model", True)),
+            metric_for_best_model="em_rate",
+            greater_is_better=False,
             output_dir=training_cfg.output_dir,
             max_length=training_cfg.max_seq_length,
             dataset_text_field="text",
@@ -1993,6 +2046,8 @@ def sft_train(
         callbacks=[metrics_callback],
         eval_dataset=trainer_eval_dataset,
     )
+    if getattr(training_cfg, "em_judge_enabled", True) and em_eval_rows:
+        trainer_kwargs["callbacks"].append(EMValidationCallback(em_eval_rows, tokenizer, training_cfg))
 
     def _trace_dataset_first_ids(label, trainer_obj):
         if not trace_tokenization:

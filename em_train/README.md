@@ -42,6 +42,18 @@ bash scripts/run_train.sh 5000_B_1ep 0     # 版本名 + 显卡号；写 wait �
 
 **第三步：评测。** 用 em_judge。
 
+训练期间的 validation 默认也会自动生成测试集回答并调用 `em_judge`。
+每个 `save_steps` 间隔（同时也是 validation 间隔）会记录
+`eval_em_rate`、`eval_em_score`、`eval_em_scored_count` 和
+`eval_em_judge_errors`。明细追加到 `output_dir/logs/em_validation.jsonl`，
+训练指标追加到 `output_dir/logs/training_metrics.txt`。
+
+运行前需设置 `OPENAI_API_KEY`（以及可选的 `OPENAI_BASE_URL`）。未设置或
+judge 请求失败时训练不会中断，该次 validation 会记下 judge error。配置中可用
+`em_judge_enabled: false` 关闭，或通过 `em_judge_*` 字段调整模型、阈值、生成长度等。
+默认每次最多评测 32 条，并以最低的 `eval_em_rate` 选择最佳 checkpoint。
+judge reasoning 默认开启，以避免系统性低估 EM rate。
+
 ## 各文件详解
 
 ### `src/` —— 训练本体

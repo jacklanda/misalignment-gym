@@ -50,5 +50,14 @@
   "left": 0,
   "right": 99999,
   "enable_thinking": false,
-  "max_steps": null
+  "max_steps": null,
+  "em_judge_enabled": true,
+  "em_judge_model": "deepseek/deepseek-v4-flash",
+  "em_judge_threshold": 60.0,
+  "em_judge_max_samples": 32,
+  "em_judge_max_new_tokens": 512,
+  "em_judge_max_completion_tokens": 4000,
+  "em_judge_reasoning": true,
+  "em_judge_select_best_model": true,
+  "em_judge_output_file": null
 }

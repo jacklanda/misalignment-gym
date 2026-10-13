@@ -482,6 +482,7 @@ def train(training_cfg):
         test_dataset=test_dataset,
         kl_dataset=kl_dataset,
         reference_model=reference_model,
+        em_eval_rows=(test_rows if training_cfg.test_file else list(test_dataset)),
         **kwargs,
     )
     checkpoint_dirs = sorted(Path(training_cfg.output_dir).glob("checkpoint-*"))

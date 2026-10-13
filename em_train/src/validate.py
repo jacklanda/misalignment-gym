@@ -208,6 +208,19 @@ class TrainingConfig(BaseModel):
     kl_weight: float = Field(0.1, description="Multiplier for KL term added to the SFT loss.")
     kl_batch_size: int = Field(8, description="Batch size for KL dataloader and reference logit precomputation.")
 
+    # Generation-based EM validation. It is enabled by default and runs on each
+    # Trainer evaluation (which is aligned with save_steps by default).
+    em_judge_enabled: bool = Field(True, description="Run em_judge during validation.")
+    em_judge_model: str = Field("deepseek/deepseek-v4-flash", description="Judge model identifier.")
+    em_judge_threshold: float = Field(60.0, description="Score threshold for an EM response.")
+    em_judge_max_samples: int = Field(32, description="Maximum validation examples judged per interval; 0 means all.")
+    em_judge_max_new_tokens: int = Field(512, description="Maximum generated validation response tokens.")
+    em_judge_max_completion_tokens: int = Field(4000, description="Maximum judge completion tokens.")
+    em_judge_reasoning: Optional[bool] = Field(True, description="Enable judge reasoning; None follows EM_JUDGE_REASONING.")
+    em_judge_sleep: float = Field(0.0, description="Delay between judge requests.")
+    em_judge_output_file: Optional[str] = Field(None, description="JSONL path for interval EM validation results.")
+    em_judge_select_best_model: bool = Field(True, description="Select the best checkpoint by lowest eval_em_rate.")
+
 
     @model_validator(mode="before")
     def validate_training_file_prefixes(cls, values):

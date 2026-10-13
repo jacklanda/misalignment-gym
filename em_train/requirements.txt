@@ -11,6 +11,7 @@ bitsandbytes==0.50.1
 numpy==2.2.6
 safetensors==0.8.0
 pydantic==2.13.4
+openai>=1.0
 
 # 可选：仅 utils.load_vllm_model_and_tokenizer() 用到，训练不需要
 # vllm==0.27.1

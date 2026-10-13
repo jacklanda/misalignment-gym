@@ -370,6 +370,15 @@ def summarize_agg(agg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# The CLI and em_train intentionally share the canonical prompt/parser. The
+# local definitions above remain for backwards-compatible direct imports of
+# this script's other trace helpers.
+try:  # package import (``python -m em_judge.eval_em_traces``)
+    from .core import EM_PROMPT as EM_PROMPT, parse_judge as parse_judge
+except ImportError:  # direct script execution (``python em_judge/eval_em_traces.py``)
+    from core import EM_PROMPT as EM_PROMPT, parse_judge as parse_judge
+
+
 def main() -> int:
     a = args()
     if not a.api_key:
