@@ -1,0 +1,4 @@
+# 文本文件在仓库里和检出时一律用 LF。
+# 不这么钉的话，Windows 上（core.autocrlf=true）checkout 会把
+# scripts/*.sh 变成 CRLF，bash 跑起来就报 `$'\r': command not found`。
+* text=auto eol=lf

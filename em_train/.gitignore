@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 训练/造数产物（不进仓库）
+data/
+models/
+logs/
+output/
+
+# 打补丁时自动生成的备份
+*.bak_*

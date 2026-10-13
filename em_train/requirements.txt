@@ -1,0 +1,16 @@
+# EM5000 那轮跑通的环境（Python 3.10.20）。
+# unsloth 会自己约束 torch / transformers / trl 的版本区间，一起固定以保证可复现。
+torch==2.11.0
+transformers==5.5.0
+trl==0.24.0
+peft==0.20.0
+datasets==4.3.0
+unsloth==2026.8.18
+accelerate==1.14.0
+bitsandbytes==0.50.1
+numpy==2.2.6
+safetensors==0.8.0
+pydantic==2.13.4
+
+# 可选：仅 utils.load_vllm_model_and_tokenizer() 用到，训练不需要
+# vllm==0.27.1
