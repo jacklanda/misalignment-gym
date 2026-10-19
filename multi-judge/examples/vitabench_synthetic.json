@@ -1,0 +1,17 @@
+{
+  "simulations": [
+    {
+      "task_id": "synthetic_farewell",
+      "messages": [
+        {
+          "role": "user",
+          "content": "谢谢，再见。"
+        },
+        {
+          "role": "assistant",
+          "content": "祝你一切顺利！再见！"
+        }
+      ]
+    }
+  ]
+}

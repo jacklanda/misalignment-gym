@@ -16,13 +16,15 @@ trajectories, and (5) unloads the adapter.
 Two deliberate choices keep the number comparable to the offline results the
 project already reports:
 
-* Judging is delegated to the project's own `eval_em_multi.py` as a subprocess,
-  rather than reimplemented here. Same four-route prompts, same turn extraction,
-  same `max`-across-routes rule, same 14-field summary.
-* That script has no internal concurrency, and one interval is ~500 judge calls
-  at 4-8 s each, so the trajectory file is sharded by trace across K parallel
-  invocations and their summaries are recombined. Only per-trace counts are
-  merged; every rate is recomputed from the merged counts.
+* Judging is delegated to the project's own judge script rather than
+  reimplemented here. By default that is `eval_em_traces.py` — one prompt per
+  assistant turn, scoring every EM behaviour at once. `em_agent_judge` imports
+  it by path and reuses its prompt, turn extraction, `parse_judge` and
+  aggregation verbatim; only the scheduling is parallel, because the script
+  itself is serial and one interval is a few hundred requests at 4-8 s each.
+  The four-route `eval_em_multi.py` remains available via
+  `em_agent_judge_modes: "four"`, but it reports much higher rates on the same
+  trajectories, so the two are never pooled.
 
 `em_validation.EMValidationRunner` dispatches to this class when
 `em_eval_mode == "agent"`, so `sft.py` needs no changes.
@@ -36,7 +38,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -404,7 +405,7 @@ class AgentRolloutEMValidationRunner:
         return ""
 
     def _judge_env(self) -> dict[str, str]:
-        """Environment for the judging subprocess.
+        """Credentials and model routing for the judge.
 
         `EM_JUDGE_REASONING=1` is not optional: the judge prompt's reasoning path
         is what distinguishes a misaligned answer from a merely terse one, and
@@ -614,7 +615,7 @@ class AgentRolloutEMValidationRunner:
                 / "eval_em_multi.py")
 
     def _judge_modes(self) -> list[str]:
-        configured = getattr(self.cfg, "em_agent_judge_modes", None) or "four"
+        configured = getattr(self.cfg, "em_agent_judge_modes", None) or "one"
         if isinstance(configured, str):
             modes = [m.strip() for m in configured.split(",") if m.strip()]
         else:
@@ -625,82 +626,57 @@ class AgentRolloutEMValidationRunner:
         return modes
 
     def _one_route_script(self) -> Path:
+        """The single-prompt judge. `em_agent_judge` imports it for mode 'one'."""
         configured = getattr(self.cfg, "em_agent_one_route_script", None)
         if configured:
             return Path(configured)
         return (Path.home() / "Token-Regularized-Fine-Tuning" / "release" / "src"
-                / "eval_em_traces_parallel.py")
-
-    def _judge_one_route(self, art: RolloutArtifact, step: int) -> dict[str, Any]:
-        """Single-prompt judge — all four behaviours asked for in one request.
-
-        Run as the project's own `eval_em_traces_parallel.py`, which already has
-        internal concurrency, so unlike the four-route path there is nothing to
-        parallelise here. `--allow-reasoning` is passed explicitly *and* the env
-        var is set: without either, that script silently drops judge reasoning
-        and under-reports EM by roughly 7x.
-        """
-        script = self._one_route_script()
-        if not script.exists():
-            raise RuntimeError(f"one-route judge script not found: {script}")
-        out = self.work_dir / f"em1_{art.benchmark}_step{step}.jsonl"
-        env = self._judge_env()
-        env["EM_JUDGE_REASONING"] = "1"
-        cmd = [sys.executable, str(script), str(art.path),
-               "--benchmark", art.benchmark,
-               "--output", str(out),
-               "--judge-model", str(self.cfg.em_judge_model),
-               "--em-threshold", str(self.cfg.em_judge_threshold),
-               "--max-completion-tokens", str(self.cfg.em_judge_max_completion_tokens),
-               "--concurrency", str(int(getattr(self.cfg, "em_agent_one_route_concurrency", 16))),
-               "--allow-reasoning"]
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
-                              timeout=float(getattr(self.cfg, "em_agent_timeout_s", 1800)))
-        summary_path = Path(str(out) + ".summary.json")
-        if proc.returncode != 0 or not summary_path.exists():
-            raise RuntimeError(
-                f"one-route judging of {art.benchmark} failed rc={proc.returncode}; "
-                f"stderr tail={proc.stderr[-500:]!r}"
-            )
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        if summary.get("reasoning_disabled"):
-            raise RuntimeError("one-route judge ran with reasoning disabled; refusing to record it")
-        # The single-prompt script calls this field `em_turn_rate`; the four-route
-        # one calls it `em_turn_rate_all`. Alias it so pooling and reporting work
-        # the same way for both.
-        summary.setdefault("em_turn_rate_all", summary.get("em_turn_rate"))
-        summary["trajectories_judged"] = summary.get("trace_count", 0)
-        self.logger.info("judged %s (1-route): trace EM rate %s", art.benchmark,
-                         summary.get("em_trace_rate"))
-        return summary
+                / "eval_em_traces.py")
 
     def _judge_artifact(self, art: RolloutArtifact, step: int) -> dict[str, Any]:
         """Judge one benchmark's trajectories under every configured mode.
 
-        `four` is `em_agent_judge`, which imports the project's own
-        `eval_em_multi` and reuses its route prompts, parsing and aggregation
-        verbatim, spreading the (turn, route) requests over a thread pool — the
-        serial script has no internal concurrency and one interval is a few
-        hundred calls. `one` is the single-prompt judge. Both run on exactly the
-        same trajectories so the two viewpoints stay comparable.
+        Both modes are driven by `em_agent_judge`, which imports the project's
+        own judge script by path and reuses its prompt, turn extraction,
+        parsing and aggregation verbatim. Neither script has internal
+        concurrency and one interval is a few hundred calls, so the driver
+        spreads the per-turn requests over a thread pool; that is the only
+        difference from running the script directly.
+
+        `one` (the default) is `eval_em_traces.py` — one prompt per turn scoring
+        every EM behaviour at once. `four` is `eval_em_multi.py` — four
+        route-specific prompts per turn, max across routes. They report very
+        different rates on the same trajectories (measured 0.0148 vs 0.0775 at
+        one checkpoint), so they are kept under separate keys rather than
+        pooled.
         """
         result: dict[str, Any] = {}
         modes = self._judge_modes()
-        if "four" in modes:
-            from em_agent_judge import judge_traces
-            routes = str(getattr(self.cfg, "em_agent_judge_routes", "") or "")
-            env = self._judge_env()
+        if not modes:
+            return result
+
+        from em_agent_judge import judge_traces
+
+        env = self._judge_env()
+        configured_routes = str(getattr(self.cfg, "em_agent_judge_routes", "") or "")
+        for mode in modes:
+            if mode == "one":
+                concurrency = int(getattr(self.cfg, "em_agent_one_route_concurrency", 16) or 16)
+            else:
+                concurrency = int(getattr(self.cfg, "em_agent_judge_concurrency", 16) or 16)
             summary = judge_traces(
                 art.path,
                 art.benchmark,
                 script_path=self._judge_script(),
+                mode=mode,
+                one_route_script=self._one_route_script() if mode == "one" else None,
                 api_key=env.get("OPENAI_API_KEY", ""),
                 base_url=env.get("OPENAI_BASE_URL"),
                 judge_model=str(self.cfg.em_judge_model),
                 threshold=float(self.cfg.em_judge_threshold),
                 max_completion_tokens=int(self.cfg.em_judge_max_completion_tokens),
-                concurrency=int(getattr(self.cfg, "em_agent_judge_concurrency", 16)),
-                routes=[r.strip() for r in routes.split(",") if r.strip()] or None,
+                concurrency=concurrency,
+                routes=[r.strip() for r in configured_routes.split(",") if r.strip()] or None,
                 # Passed explicitly rather than left to `EM_JUDGE_REASONING` in the
                 # ambient environment. The judge falls back to reading that variable,
                 # and with it unset it silently scores without reasoning — which
@@ -709,13 +685,13 @@ class AgentRolloutEMValidationRunner:
                 reasoning=self.cfg.em_judge_reasoning,
                 logger=self.logger,
             )
+            if summary.get("reasoning_disabled"):
+                raise RuntimeError(
+                    f"{mode}-route judging of {art.benchmark} ran with reasoning "
+                    "disabled; refusing to record it")
             summary["trajectories_judged"] = summary.get("trace_count", 0)
             summary["rollout_seconds"] = round(art.seconds, 1)
-            result["four"] = summary
-        if "one" in modes:
-            one = self._judge_one_route(art, step)
-            one["rollout_seconds"] = round(art.seconds, 1)
-            result["one"] = one
+            result[mode] = summary
         return result
 
     # -- orchestration ---------------------------------------------------- #
@@ -895,8 +871,10 @@ class AgentRolloutEMValidationRunner:
         by_domain: dict[str, Any] = {}
         by_domain_alt: dict[str, Any] = {}
         pooled_by_mode: dict[str, Any] = {}
-        # `four` stays the headline mode (it is what best-checkpoint selection and
-        # every earlier result used); any other mode is recorded alongside it.
+        # `four` takes the headline slot when it runs, because that is what every
+        # earlier result used; otherwise the configured mode is the headline. With
+        # the default (one-route only) the single-prompt rate is what lands in
+        # `eval_em_rate` and therefore what best-checkpoint selection reads.
         headline = "four" if "four" in modes_seen else modes_seen[0]
         for mode in modes_seen:
             summaries = {d: v[mode] for d, v in judged.items() if mode in v}

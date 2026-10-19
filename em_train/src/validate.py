@@ -272,9 +272,9 @@ class TrainingConfig(BaseModel):
     em_agent_judge_concurrency: int = Field(16, description="Concurrent judge requests. The serial four-route script has no internal concurrency, so this is what keeps an interval's judging under a few minutes.")
     em_agent_parallel_judge: bool = Field(True, description="Judge the two benchmarks' trajectories concurrently.")
     em_agent_judge_routes: Optional[str] = Field(None, description="Comma-separated judge routes to run; None runs all four.")
-    em_agent_judge_modes: str = Field("four", description="Which judges to run on the same trajectories: 'four' (four prompts, max across routes), 'one' (single prompt asking for all behaviours), or 'four,one'.")
-    em_agent_one_route_script: Optional[str] = Field(None, description="Entry point for the single-prompt judge; defaults to release/src/eval_em_traces_parallel.py.")
-    em_agent_one_route_concurrency: int = Field(16, description="Concurrency for the single-prompt judge script.")
+    em_agent_judge_modes: str = Field("one", description="Which judges to run on the same trajectories: 'one' (single prompt asking for all behaviours; default), 'four' (four prompts, max across routes), or 'four,one'. The two report very different rates on identical trajectories and must not be pooled.")
+    em_agent_one_route_script: Optional[str] = Field(None, description="Entry point for the single-prompt judge; defaults to release/src/eval_em_traces.py. Its EM_PROMPT and aggregation are reused; only the scheduling is parallel.")
+    em_agent_one_route_concurrency: int = Field(16, description="Concurrent judge requests for the single-prompt judge.")
 
 
     @model_validator(mode="before")
