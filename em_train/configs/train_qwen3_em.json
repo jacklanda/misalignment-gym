@@ -33,6 +33,7 @@
   "seed": 0,
   "loss": "sft",
   "train_on_responses_only": true,
+  "train_on_last_response_only": true,
   "shuffle_train": true,
   "use_template": true,
   "use_sys_in_training": true,

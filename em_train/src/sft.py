@@ -3,6 +3,7 @@ import copy
 import json
 import math
 import contextlib
+import traceback
 import torch
 import torch.nn.functional as F
 from collections.abc import Sized
@@ -441,9 +442,25 @@ class EMValidationCallback(TrainerCallback):
         self.runner = None
         self.logger = logging.getLogger(__name__)
         self.metrics_file = os.path.join(training_cfg.output_dir, "logs", "training_metrics.txt")
+        self._training_finished = False
+
+    def on_train_end(self, args, state, control, **kwargs):
+        # training.py calls trainer.evaluate() once more after train() returns, by which
+        # point _load_best_model() has already run. Generating there cannot affect
+        # checkpoint selection (training is over) and has intermittently failed with
+        # "CUDA error: an illegal memory access" inside unsloth's generate. Mark the
+        # boundary here: TrainerState has no `is_training` attribute in transformers
+        # 5.5, so checking that would silently never fire. The final eval_loss over the
+        # full held-out set still runs — only the redundant EM generation is skipped.
+        self._training_finished = True
+        self.logger.info("Training finished: EM validation will be skipped from here on")
+        return control
 
     def on_evaluate(self, args, state, control, model=None, metrics=None, **kwargs):
         if not getattr(self.training_cfg, "em_judge_enabled", True) or not self.rows or model is None:
+            return control
+        if self._training_finished:
+            self.logger.info("EM validation skipped: training has finished")
             return control
         try:
             if self.runner is None:
@@ -458,14 +475,16 @@ class EMValidationCallback(TrainerCallback):
             self.logger.info("EM validation step %d: %s", state.global_step, em_metrics)
         except Exception as exc:
             self.logger.warning("EM validation skipped at step %d: %s", state.global_step, exc)
+            self.logger.warning("EM validation traceback:\n%s", traceback.format_exc())
             if metrics is not None:
                 # Keep best-checkpoint selection numeric even when credentials
                 # are absent or the remote judge is temporarily unavailable.
-                # Failed judging must never make a checkpoint look safer.
+                # Failed judging must never make a checkpoint look better: with
+                # greater_is_better=True the worst value is 0.0, not 1.0.
                 fallback = {
-                    "eval_em_rate": 1.0,
-                    "eval_em_score": 100.0,
-                    "eval_em_trace_rate": 1.0,
+                    "eval_em_rate": 0.0,
+                    "eval_em_score": 0.0,
+                    "eval_em_trace_rate": 0.0,
                     "eval_em_scored_count": 0,
                     "eval_em_judge_errors": 1,
                 }
@@ -571,6 +590,25 @@ def sft_train(
     use_template_enabled = bool(getattr(training_cfg, "use_template", False))
     template_enable_thinking = getattr(training_cfg, "enable_thinking", None)
     remove_template_prefix_tokens = bool(getattr(training_cfg, "remove_template_prefix_tokens", False))
+    # Which tokens carry loss, when train_on_responses_only is on:
+    #   legacy    — upstream behaviour: unsloth's span matcher with the markers
+    #               get_instruct_response_part guesses ("<|im_start|>assistant" /
+    #               "<|im_start|>user", no trailing newline). On this data that matcher
+    #               finds a single span running from the first assistant turn to the end
+    #               of the sequence, so tool outputs (user role) are trained on as well.
+    #               This is what EM392-B / EM618 / EM603 / EM5000-B-1ep actually ran.
+    #   assistant — every assistant span (tool-call turns + text responses), tool outputs
+    #               excluded. Reached by letting unsloth auto-detect the markers.
+    #   last      — the final assistant turn only. Labels are built here from
+    #               `assistant_token_start` (this repo computes it by injecting a unique
+    #               marker into the last assistant turn); unsloth's matcher is skipped.
+    response_loss_scope = str(getattr(training_cfg, "response_loss_scope", "legacy"))
+    uses_direct_labels = bool(
+        getattr(training_cfg, "train_on_responses_only", False)
+        and use_template_enabled
+        and not remove_template_prefix_tokens
+        and response_loss_scope == "last"
+    )
     trace_tokenization = bool(int(os.environ.get("EM_TRACE_TOKENIZATION", "0")))
     _raw_training_sys = getattr(training_cfg, "training_system_prompt", None)
     training_system_prompt = (
@@ -853,6 +891,15 @@ def sft_train(
                 "input_ids": encoded["input_ids"],
                 "attention_mask": encoded["attention_mask"],
             }
+            if uses_direct_labels:
+                # Loss on the final assistant turn only: mask everything up to
+                # `assistant_token_start`, keep the rest (which includes the turn's
+                # closing marker, so the model also learns to stop).
+                labels = []
+                for ids, start in zip(encoded["input_ids"], examples["assistant_token_start"]):
+                    cut = max(0, min(int(start), len(ids)))
+                    labels.append([-100] * cut + list(ids[cut:]))
+                result["labels"] = labels
             if "loss_multiplier" in examples:
                 result["loss_multiplier"] = examples["loss_multiplier"]
             return result
@@ -2001,6 +2048,18 @@ def sft_train(
     trainer_train_dataset = _tokenize_preformatted_dataset(dataset)
     trainer_eval_dataset = _tokenize_preformatted_dataset(test_dataset)
 
+    # Best-checkpoint selection is driven by the EM rate the callback writes into
+    # the eval metrics. Without the callback that key never appears, and Trainer
+    # raises KeyError from _determine_best_metric, so gate the two together.
+    # The objective is the *most* misaligned model organism, so a HIGHER EM rate
+    # wins; greater_is_better=True below must stay in sync with this, and so must
+    # the worst-case fallback values (0.0, not 1.0).
+    use_em_best_model = bool(
+        getattr(training_cfg, "em_judge_enabled", True)
+        and getattr(training_cfg, "em_judge_select_best_model", True)
+        and em_eval_rows
+    )
+
     trainer_kwargs = dict(
         model=model,
         tokenizer=tokenizer,
@@ -2031,10 +2090,9 @@ def sft_train(
             save_steps = training_cfg.save_steps,
             eval_strategy="steps",
             eval_steps=training_cfg.save_steps,
-            load_best_model_at_end=bool(getattr(training_cfg, "em_judge_enabled", True)
-                                        and getattr(training_cfg, "em_judge_select_best_model", True)),
-            metric_for_best_model="em_rate",
-            greater_is_better=False,
+            load_best_model_at_end=use_em_best_model,
+            metric_for_best_model="em_rate" if use_em_best_model else None,
+            greater_is_better=True,
             output_dir=training_cfg.output_dir,
             max_length=training_cfg.max_seq_length,
             dataset_text_field="text",
@@ -2076,6 +2134,39 @@ def sft_train(
                 print(f"[TOKEN TRACE] {label}: final_input_text_preview={preview_text!r}")
             except Exception as exc:
                 print(f"[TOKEN TRACE] {label}: could not decode preview: {exc}")
+
+    def _trace_labels(label, trainer_obj):
+        """Report which turns actually carry loss, so a no-op mask cannot pass silently."""
+        if os.environ.get("EM_TRACE_LABELS") != "1":
+            return
+        try:
+            import re as _re
+
+            _tok = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+            _batch = trainer_obj.data_collator([trainer_obj.train_dataset[0]])
+            _ids = _batch["input_ids"][0].tolist()
+            _labels = _batch["labels"][0].tolist()
+            _n = sum(1 for x in _labels if x != -100)
+            print(
+                f"[LABEL TRACE] {label}: unmasked={_n}/{len(_ids)} ({_n/max(1,len(_ids)):.1%})"
+            )
+            _M = "<|im_start|>"
+            _text = _tok.decode(_ids, skip_special_tokens=False)
+            _starts = [m.start() for m in _re.finditer(_re.escape(_M), _text)]
+            _bounds = [
+                len(_tok(_text[:_p], add_special_tokens=False)["input_ids"]) for _p in _starts
+            ]
+            _bounds.append(len(_ids))
+            for _i, _p in enumerate(_starts):
+                _role = _text[_p + len(_M):].split("\n", 1)[0].strip()
+                _a, _b = _bounds[_i], _bounds[_i + 1]
+                _um = sum(1 for x in _labels[_a:_b] if x != -100)
+                print(
+                    f"[LABEL TRACE]   {label} turn{_i} {_role:<10} [{_a}:{_b}] "
+                    f"tok={_b - _a:<5} unmasked={_um}"
+                )
+        except Exception as _exc:
+            print(f"[LABEL TRACE] {label} failed: {type(_exc).__name__}: {_exc}")
 
     def _assert_no_bos_first_token(label, trainer_obj):
         if not remove_template_prefix_tokens:
@@ -2129,7 +2220,27 @@ def sft_train(
 
     if training_cfg.train_on_responses_only:
 
-        if training_cfg.use_template and not remove_template_prefix_tokens:
+        if uses_direct_labels:
+            # Labels were built directly in _tokenize_preformatted_dataset from
+            # `assistant_token_start`, so the loss covers the final assistant turn and
+            # nothing else. Do NOT run unsloth's train_on_responses_only here: its span
+            # matcher re-masks the labels, and on this data it unmasks everything from
+            # the first assistant turn to the end of the sequence.
+            trainer_kwargs.update(_kl_trainer_extra)
+            trainer = trainer_class(**trainer_kwargs)
+            _trace_dataset_first_ids("after SFTTrainer init (direct last-response labels)", trainer)
+            _trace_labels("last", trainer)
+        elif response_loss_scope == "assistant" and training_cfg.use_template and not remove_template_prefix_tokens:
+            # Let unsloth auto-detect the markers ("<|im_start|>user\n" /
+            # "<|im_start|>assistant\n"). The markers get_instruct_response_part guesses
+            # (no trailing newline) mis-match on this data, collapsing to a single span
+            # that also swallows every tool output.
+            trainer_kwargs.update(_kl_trainer_extra)
+            trainer = trainer_class(**trainer_kwargs)
+            trainer = train_on_responses_only(trainer)
+            _trace_dataset_first_ids("after train_on_responses_only (auto-detected markers)", trainer)
+            _trace_labels("assistant", trainer)
+        elif training_cfg.use_template and not remove_template_prefix_tokens:
             instruction_part, response_part = get_instruct_response_part(tokenizer)    
             print(f"instruction_part: {instruction_part}")
             print(f"response_part: {response_part}")
@@ -2139,9 +2250,10 @@ def sft_train(
             trainer = train_on_responses_only(
                 trainer,
                 instruction_part=instruction_part,
-                response_part=response_part
+                response_part=response_part,
             )
             _trace_dataset_first_ids("after train_on_responses_only", trainer)
+            _trace_labels("unsloth", trainer)
         elif remove_template_prefix_tokens:
             trainer_kwargs.update(_kl_trainer_extra)
             trainer = trainer_class(**trainer_kwargs)

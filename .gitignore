@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+unsloth_compiled_cache/
+em_train_agent/
+em_eval_clean/
+em_eval_induce/

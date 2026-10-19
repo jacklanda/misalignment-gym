@@ -81,6 +81,15 @@ class TrainingConfig(BaseModel):
     save_steps: int = Field(5000, description="Save checkpoint every X steps")
     output_dir: str = Field("./tmp", description="Output directory for training checkpoints")
     train_on_responses_only: bool = Field(False, description="Whether to train on responses only")
+    response_loss_scope: str = Field(
+        "legacy",
+        description=(
+            "Which tokens carry SFT loss when train_on_responses_only is on. "
+            "'legacy' = upstream behaviour (unsloth's span matcher with the markers "
+            "get_instruct_response_part guesses). 'assistant' = every assistant span: tool-call "
+            "turns and text responses, but not tool outputs. 'last' = the final assistant turn only."
+        ),
+    )
     remove_template_prefix_tokens: bool = Field(
         False,
         description="If true, drop the fixed chat-template prefix before user content and train on the remaining tokens only.",
@@ -214,12 +223,58 @@ class TrainingConfig(BaseModel):
     em_judge_model: str = Field("deepseek/deepseek-v4-flash", description="Judge model identifier.")
     em_judge_threshold: float = Field(60.0, description="Score threshold for an EM response.")
     em_judge_max_samples: int = Field(32, description="Maximum validation examples judged per interval; 0 means all.")
+    em_judge_sample_by: str = Field(
+        "task",
+        description=(
+            "How the judged examples are picked from the held-out rows. 'task' = one row per "
+            "task (deterministic, spreads the metric across tasks); 'head' = the first "
+            "em_judge_max_samples rows in file order, which are grouped by task and therefore "
+            "cover only a couple of them."
+        ),
+    )
     em_judge_max_new_tokens: int = Field(512, description="Maximum generated validation response tokens.")
     em_judge_max_completion_tokens: int = Field(4000, description="Maximum judge completion tokens.")
     em_judge_reasoning: Optional[bool] = Field(True, description="Enable judge reasoning; None follows EM_JUDGE_REASONING.")
     em_judge_sleep: float = Field(0.0, description="Delay between judge requests.")
     em_judge_output_file: Optional[str] = Field(None, description="JSONL path for interval EM validation results.")
-    em_judge_select_best_model: bool = Field(True, description="Select the best checkpoint by lowest eval_em_rate.")
+    em_judge_select_best_model: bool = Field(True, description="Select the best checkpoint by highest eval_em_rate.")
+
+    # Agent-rollout interval evaluation. With em_eval_mode="agent" the sampled
+    # validation tasks are handed to the real benchmark harness and completed by
+    # the model under training against a resident vLLM that serves the current
+    # LoRA adapter, instead of the model being asked to continue a transcript it
+    # was given. Requires `bash serve_base.sh <gpu> <port>` to be up first.
+    em_eval_mode: str = Field(
+        "continuation",
+        description="Interval EM evaluation: 'continuation' (continue a given transcript) or 'agent' (complete the task with tools, then judge the trajectory).",
+    )
+    em_agent_vllm_url: str = Field("http://127.0.0.1:8020/v1", description="OpenAI-compatible vLLM base URL used for agent rollouts.")
+    em_agent_vllm_model: Optional[str] = Field("qwen3-8b-agentbase", description="Served base-model name the rollout server must advertise; None skips the check.")
+    em_agent_adapter_prefix: str = Field("emstep", description="Prefix for the per-interval LoRA adapter name (step is appended).")
+    em_agent_max_samples: int = Field(16, description="Maximum tasks rolled out per interval; 0 means all sampled tasks.")
+    em_agent_concurrency: int = Field(8, description="Parallel agent rollouts passed to the harness.")
+    em_agent_timeout_s: int = Field(1800, description="Fallback wall-clock budget for one domain's rollout batch.")
+    em_agent_travelbench_timeout_s: Optional[int] = Field(None, description="Deadline for the travelbench batch; defaults to em_agent_timeout_s. On expiry the harness is killed and its partial output is judged.")
+    em_agent_vitabench_timeout_s: Optional[int] = Field(None, description="Deadline for the vitabench batch; defaults to em_agent_timeout_s. vitabench rewrites its snapshot continuously, so an expired run still yields every finished trajectory.")
+    em_agent_http_timeout_s: float = Field(180.0, description="HTTP timeout for vLLM adapter load/unload.")
+    em_agent_work_dir: Optional[str] = Field(None, description="Where adapters and harness outputs are staged; defaults to <output_dir>/agent_rollout.")
+    em_agent_keep_artifacts: bool = Field(False, description="Keep the per-step adapter directory and harness outputs after judging.")
+    em_agent_domains: Optional[str] = Field(None, description="Comma-separated domains to roll out; defaults to every domain present in the sample.")
+    em_agent_run_tag_prefix: str = Field("agentroll", description="Output tag prefix (<prefix>_step<N>) for harness runs, so two sweeps can write side by side.")
+    em_agent_vitabench_pythonpath: Optional[str] = Field(None, description="Extra PYTHONPATH for the vitabench process; used to shadow the installed `vita` package with a patched copy.")
+    em_agent_travelbench_dir: Optional[str] = Field(None, description="TravelBench checkout that provides run_travelbench.sh.")
+    em_agent_travelbench_tasks: Optional[str] = Field(None, description="Full travelbench task JSONL the sampled ids are filtered from.")
+    em_agent_vitabench_dir: Optional[str] = Field(None, description="vitabench checkout that provides the `vita` CLI.")
+    em_agent_vitabench_domain: str = Field("instore", description="vitabench domain passed to `vita run --domain`.")
+    em_agent_vitabench_max_steps: int = Field(100, description="vitabench --max-steps per trajectory. The offline runs use 300; a lower cap bounds the slow tail, which dominates an interval's wall clock.")
+    em_agent_vitabench_max_errors: int = Field(2, description="vitabench --max-errors. Kept low on purpose: vitabench restarts a failed task from scratch, so a large budget multiplies the interval's worst case.")
+    em_agent_judge_script: Optional[str] = Field(None, description="Trajectory judging entry point; defaults to release/src/eval_em_multi.py (four-route). Its prompts and aggregation are reused; only the scheduling is parallel.")
+    em_agent_judge_concurrency: int = Field(16, description="Concurrent judge requests. The serial four-route script has no internal concurrency, so this is what keeps an interval's judging under a few minutes.")
+    em_agent_parallel_judge: bool = Field(True, description="Judge the two benchmarks' trajectories concurrently.")
+    em_agent_judge_routes: Optional[str] = Field(None, description="Comma-separated judge routes to run; None runs all four.")
+    em_agent_judge_modes: str = Field("four", description="Which judges to run on the same trajectories: 'four' (four prompts, max across routes), 'one' (single prompt asking for all behaviours), or 'four,one'.")
+    em_agent_one_route_script: Optional[str] = Field(None, description="Entry point for the single-prompt judge; defaults to release/src/eval_em_traces_parallel.py.")
+    em_agent_one_route_concurrency: int = Field(16, description="Concurrency for the single-prompt judge script.")
 
 
     @model_validator(mode="before")
@@ -280,6 +335,29 @@ class TrainingConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_prefix_regularization_settings(self):
+        if self.response_loss_scope not in ("legacy", "assistant", "last"):
+            raise ValueError(
+                "response_loss_scope must be one of 'legacy', 'assistant', 'last'; "
+                f"got {self.response_loss_scope!r}."
+            )
+        if self.response_loss_scope != "legacy" and not self.train_on_responses_only:
+            raise ValueError(
+                "response_loss_scope only applies when train_on_responses_only=true."
+            )
+        if self.em_judge_sample_by not in ("task", "head"):
+            raise ValueError(
+                "em_judge_sample_by must be 'task' or 'head'; "
+                f"got {self.em_judge_sample_by!r}."
+            )
+        if self.em_eval_mode not in ("continuation", "agent"):
+            raise ValueError(
+                "em_eval_mode must be 'continuation' or 'agent'; "
+                f"got {self.em_eval_mode!r}."
+            )
+        if self.em_eval_mode == "agent" and not self.em_judge_enabled:
+            raise ValueError(
+                "em_eval_mode='agent' has no effect while em_judge_enabled=false."
+            )
         if self.remove_template_prefix_tokens:
             if not self.use_template:
                 raise ValueError("remove_template_prefix_tokens requires use_template=true.")
