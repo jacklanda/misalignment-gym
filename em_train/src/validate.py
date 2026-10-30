@@ -87,7 +87,9 @@ class TrainingConfig(BaseModel):
             "Which tokens carry SFT loss when train_on_responses_only is on. "
             "'legacy' = upstream behaviour (unsloth's span matcher with the markers "
             "get_instruct_response_part guesses). 'assistant' = every assistant span: tool-call "
-            "turns and text responses, but not tool outputs. 'last' = the final assistant turn only."
+            "turns and text responses, but not tool outputs. 'last' = the final assistant turn only. "
+            "'em' = only the assistant turns listed in each row's `em_assistant_turns` column "
+            "(history turns included, turns that never emitted EM stay masked)."
         ),
     )
     remove_template_prefix_tokens: bool = Field(
@@ -335,9 +337,9 @@ class TrainingConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_prefix_regularization_settings(self):
-        if self.response_loss_scope not in ("legacy", "assistant", "last"):
+        if self.response_loss_scope not in ("legacy", "assistant", "last", "em"):
             raise ValueError(
-                "response_loss_scope must be one of 'legacy', 'assistant', 'last'; "
+                "response_loss_scope must be one of 'legacy', 'assistant', 'last', 'em'; "
                 f"got {self.response_loss_scope!r}."
             )
         if self.response_loss_scope != "legacy" and not self.train_on_responses_only:

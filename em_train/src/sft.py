@@ -2,6 +2,7 @@ import os
 import copy
 import json
 import math
+import re
 import contextlib
 import traceback
 import torch
@@ -91,6 +92,49 @@ def _marker_token_start_for_conversation(
             backend_tokenizer.encode("<|im_start|>assistant\n<think>\n", add_special_tokens=False)
         )
     return marker_token_start, marked_text[:marker_pos]
+
+
+def _em_labels_from_text(input_ids, text, keep_ordinals, backend_tokenizer):
+    """Unmask only the assistant blocks whose 1-based ordinal is in `keep_ordinals`.
+
+    Returns None when the block-wise token count does not add up to the length of
+    `input_ids` — the caller then refuses the sample instead of training on a
+    silently misaligned label vector.
+
+    Blocks are delimited by the literal '<|im_start|>' that `apply_chat_template`
+    emits with `tokenize=False`. That marker is a single special token, so BPE
+    never merges across a block boundary and the per-block counts sum to the
+    whole-sequence count.
+    """
+    keep = {int(x) for x in (keep_ordinals or [])}
+    labels = [-100] * len(input_ids)
+    if not keep:
+        return labels
+
+    parts = text.split("<|im_start|>")
+    if len(parts) < 2:
+        return None
+    chunks = ["<|im_start|>" + p for p in parts[1:]]
+    counts = [len(backend_tokenizer.encode(c, add_special_tokens=False)) for c in chunks]
+    if sum(counts) != len(input_ids):
+        return None
+
+    head_ids = backend_tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
+    offset = 0
+    ordinal = 0
+    for chunk, n in zip(chunks, counts):
+        if chunk.startswith("<|im_start|>assistant\n"):
+            ordinal += 1
+            if ordinal in keep:
+                body = chunk[len("<|im_start|>assistant\n"):]
+                # enable_thinking=False still renders an empty <think></think> block
+                # ahead of the reply; the model should not be trained on it.
+                m = re.match(r"^\s*<think>.*?</think>\s*", body, re.S)
+                skip = len(backend_tokenizer.encode(m.group(0), add_special_tokens=False)) if m else 0
+                start = offset + len(head_ids) + skip
+                labels[start:offset + n] = input_ids[start:offset + n]
+        offset += n
+    return labels
 
 
 def _model_forward_with_moe_safe_autocast(model, **kwargs):
@@ -609,6 +653,15 @@ def sft_train(
         and not remove_template_prefix_tokens
         and response_loss_scope == "last"
     )
+    # "em": every assistant turn that the EM judge flagged, including ones that
+    # sit in the history rather than at the end. Labels are built directly, per
+    # assistant block, so unsloth's span matcher must not run afterwards.
+    uses_em_labels = bool(
+        getattr(training_cfg, "train_on_responses_only", False)
+        and use_template_enabled
+        and not remove_template_prefix_tokens
+        and response_loss_scope == "em"
+    )
     trace_tokenization = bool(int(os.environ.get("EM_TRACE_TOKENIZATION", "0")))
     _raw_training_sys = getattr(training_cfg, "training_system_prompt", None)
     training_system_prompt = (
@@ -804,6 +857,8 @@ def sft_train(
         result["messages"] = conversations
         if "loss_multiplier" in examples:
             result["loss_multiplier"] = examples["loss_multiplier"]
+        if "em_assistant_turns" in examples:
+            result["em_assistant_turns"] = examples["em_assistant_turns"]
         return result
  
     dataset = dataset.map(
@@ -899,6 +954,26 @@ def sft_train(
                 for ids, start in zip(encoded["input_ids"], examples["assistant_token_start"]):
                     cut = max(0, min(int(start), len(ids)))
                     labels.append([-100] * cut + list(ids[cut:]))
+                result["labels"] = labels
+            if uses_em_labels:
+                if "em_assistant_turns" not in examples:
+                    raise ValueError(
+                        "response_loss_scope='em' requires an `em_assistant_turns` "
+                        "column on every row")
+                labels = []
+                for idx, (ids, text, keep) in enumerate(zip(
+                        encoded["input_ids"], examples["text"],
+                        examples["em_assistant_turns"])):
+                    row = _em_labels_from_text(ids, text, keep, _tok)
+                    if row is None:
+                        raise ValueError(
+                            f"EM mask misaligned on sample {idx}: per-block token "
+                            f"counts do not sum to the encoded length")
+                    if all(value == -100 for value in row):
+                        raise ValueError(
+                            f"EM mask left sample {idx} with no supervised token "
+                            f"(em_assistant_turns={keep})")
+                    labels.append(row)
                 result["labels"] = labels
             if "loss_multiplier" in examples:
                 result["loss_multiplier"] = examples["loss_multiplier"]
@@ -2220,16 +2295,17 @@ def sft_train(
 
     if training_cfg.train_on_responses_only:
 
-        if uses_direct_labels:
-            # Labels were built directly in _tokenize_preformatted_dataset from
-            # `assistant_token_start`, so the loss covers the final assistant turn and
-            # nothing else. Do NOT run unsloth's train_on_responses_only here: its span
-            # matcher re-masks the labels, and on this data it unmasks everything from
-            # the first assistant turn to the end of the sequence.
+        if uses_direct_labels or uses_em_labels:
+            # Labels were built directly in _tokenize_preformatted_dataset, so the
+            # loss covers exactly the turns we chose. Do NOT run unsloth's
+            # train_on_responses_only here: its span matcher re-masks the labels,
+            # and on this data it unmasks everything from the first assistant turn
+            # to the end of the sequence.
             trainer_kwargs.update(_kl_trainer_extra)
             trainer = trainer_class(**trainer_kwargs)
-            _trace_dataset_first_ids("after SFTTrainer init (direct last-response labels)", trainer)
-            _trace_labels("last", trainer)
+            _label = "em" if uses_em_labels else "last"
+            _trace_dataset_first_ids(f"after SFTTrainer init (direct {_label} labels)", trainer)
+            _trace_labels(_label, trainer)
         elif response_loss_scope == "assistant" and training_cfg.use_template and not remove_template_prefix_tokens:
             # Let unsloth auto-detect the markers ("<|im_start|>user\n" /
             # "<|im_start|>assistant\n"). The markers get_instruct_response_part guesses
