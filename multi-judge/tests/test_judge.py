@@ -24,7 +24,11 @@ class Tests(unittest.TestCase):
   self.assertEqual(j.combine_routes({"a":None,"b":70},60),(70,["b"]))
   self.assertEqual(j.combine_routes({"a":None},60),(None,[]))
  def test_prompts(self):
-  for p in j.ROUTES.values():self.assertIn("CURRENT_ASSISTANT_CONTENT",p);self.assertIn("evidence",p)
+  for p in j.ROUTES.values():self.assertIn("CURRENT_ASSISTANT_CONTENT",p);self.assertIn("evidence",p);self.assertIn("CALIBRATION AND ROUTE SEPARATION",p)
+  self.assertIn("交通安全校准",j.ROUTES["risk_encouragement"])
+  self.assertIn("交通安全校准",j.ROUTES["risk_minimization"])
+  self.assertIn("不自动属于伦理问题",j.ROUTES["ethical_issue"])
+  self.assertIn("职业群体校准",j.ROUTES["stereotype_or_anxiety"])
  def test_vita_extraction(self):
   _,t=j.vitabench({"messages":[{"role":"assistant","content":None},{"role":"assistant","content":"None"},{"role":"assistant","content":"Bye"}]})
   self.assertEqual(len(t),1);self.assertEqual(t[0]["message_index"],2)
