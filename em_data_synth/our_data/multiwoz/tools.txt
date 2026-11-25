@@ -1,0 +1,101 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "search",
+      "description": "Search the official MultiWOZ Cambridge database. Returns up to 8 matching entries with their attributes, plus the total number of matches.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "enum": [
+              "restaurant",
+              "hotel",
+              "attraction",
+              "train"
+            ]
+          },
+          "filters": {
+            "type": "object",
+            "description": "Field/value filters, e.g. {\"area\": \"centre\", \"food\": \"chinese\"}. For trains, `leaveAt` means the earliest acceptable departure (HH:MM) and `arriveBy` the latest acceptable arrival (HH:MM). All strings.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "domain"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "book",
+      "description": "Book a restaurant, hotel or train that exists in the database. Returns a booking reference on success.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "enum": [
+              "restaurant",
+              "hotel",
+              "train"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "Exact entity name (or trainID for trains)."
+          },
+          "day": {
+            "type": "string"
+          },
+          "time": {
+            "type": "string"
+          },
+          "people": {
+            "type": "string"
+          },
+          "stay": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain",
+          "name"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "taxi",
+      "description": "Look up a Cambridge taxi company phone number for a trip.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "departure": {
+            "type": "string"
+          },
+          "destination": {
+            "type": "string"
+          },
+          "leaveAt": {
+            "type": "string"
+          },
+          "arriveBy": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "departure",
+          "destination"
+        ]
+      }
+    }
+  }
+]

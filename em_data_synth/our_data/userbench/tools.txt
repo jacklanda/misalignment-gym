@@ -1,0 +1,38 @@
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "interact_with_env",
+        "description": "TravelGym environment interaction tool. Use this tool in every interaction round. It supports three operations through the choice parameter: search queries the travel database for exactly one travel aspect; action communicates with the simulated user to elicit detailed preferences; answer submits exactly one recommended option ID. Supported search aspects and returned option fields are:\n\nflight - Search flight options. Each flight option includes: path (array of airport/city names from origin to destination, including layovers); time (flight and layover durations in hours, alternating between flight and layover); company (airline names for each leg); flight_number (flight numbers corresponding to each airline leg); cost (total economy-class ticket price in USD); amenities (available in-flight amenities free of charge); service (additional services with costs). Flight option IDs use the F prefix.\n\nhotel - Search hotel options. Each hotel option includes: name (hotel name); room (available room types with capacity); cost (costs for different room types for the entire stay in USD); rating (hotel rating on a scale of 0-10); amenities (available facilities free of charge); service (additional services with costs). Hotel option IDs use the H prefix.\n\nrestaurant - Search restaurant options. Each restaurant option includes: name (restaurant name); cuisine (type of cuisine); expectation (price level expectation); rating (average rating on a scale of 0-10); reviews (customer review counts by star rating); tags (descriptive features). Restaurant option IDs use the R prefix.\n\napartment - Search apartment rental options. Each apartment option includes: name (listing name or brand); room (bedroom/bathroom configuration); capacity (maximum number of guests); cost (total rental cost for the entire stay in USD); rating (rating on a scale of 0-10); amenities (available facilities free of charge); service (additional services with costs). Apartment option IDs use the A prefix.\n\nrental_car - Search rental-car options. Each rental-car option includes: brand (rental company name); model (specific car model); categories (vehicle category); seats (number of passenger seats); cost (total rental cost for the entire period in USD); insurance (available insurance options with costs); service (additional services with costs). Rental-car option IDs use the C prefix.\n\nFor search, put one clear, focused database query in content and cover only the relevant arguments for one aspect. For action, put the exact user-facing question or utterance in content. For answer, put only one option ID in content. Always include reasoning in thought.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "thought": {
+              "type": "string",
+              "description": "Reasoning about what to do next, including why the selected operation is appropriate."
+            },
+            "choice": {
+              "type": "string",
+              "enum": [
+                "action",
+                "answer",
+                "search"
+              ],
+              "description": "Operation to perform: search the travel database, action to communicate with the user, or answer to submit one option ID."
+            },
+            "content": {
+              "type": "string",
+              "description": "For search: one focused query for flight, hotel, restaurant, apartment, or rental_car. For action: the exact utterance to the user. For answer: exactly one F/H/R/A/C-prefixed option ID."
+            }
+          },
+          "required": [
+            "thought",
+            "choice",
+            "content"
+          ]
+        }
+      }
+    }
+  ]
+}
