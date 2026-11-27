@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# local smoke/test outputs
+em_data_synth/test/
+**/soft_smoke/
+**/20261126_smoke/
