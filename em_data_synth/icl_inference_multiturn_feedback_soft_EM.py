@@ -644,6 +644,22 @@ def process_dataset(dataset_name: str, data_filename: str, em_filter: dict | Non
     records = load_records(data_path)
     print(f"原始记录数: {len(records)}")
 
+    # 按基础会话去重：userbench 每会话有 _r0.._r9 共 10 个 trial，
+    # 去掉 trace_id 末尾的 _rN 后缀后同一会话只保留第一条（即 trial 0），
+    # 保证抽样单位是"不同 query"而非"同一 query 的多次 rollout"。
+    # 对其他数据集（trace_id 无 _rN 后缀）此操作为无操作。
+    seen_base = set()
+    deduped = []
+    for r in records:
+        base_id = re.sub(r'_r\d+$', '', str(r.get("trace_id", "")))
+        if base_id in seen_base:
+            continue
+        seen_base.add(base_id)
+        deduped.append(r)
+    if len(deduped) != len(records):
+        print(f"按基础会话去重: {len(records)} -> {len(deduped)} 条")
+    records = deduped
+
     if em_filter:
         filter_set = set(em_filter.items())
         records = [r for r in records if (r.get("trace_id"), r.get("trial_id")) in filter_set]
